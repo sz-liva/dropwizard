@@ -5,17 +5,19 @@ Quiz Ranking Simulation
 Simulates quiz results based on per-question success rates to estimate
 what ranking a team would achieve.
 
-Usage:
-  # Provide quiz stats via stdin and target answers as arguments
-  echo "1: 177/313
-  2: 190/313
-  3: 266/313" | python3 quiz_ranking_simulation.py 1 2
+Supports two simulation modes:
+1. Independent: Questions answered independently (no correlation between team strength)
+2. Correlated: Stronger teams perform better across all questions
 
-  # Or use a file
+Usage:
+  # Independent mode (default)
   python3 quiz_ranking_simulation.py 1 2 4 7 < quiz_stats.txt
 
-  # Control number of simulations
-  python3 quiz_ranking_simulation.py 1 2 --simulations 50000 < quiz_stats.txt
+  # Correlated mode (models team strength)
+  python3 quiz_ranking_simulation.py 1 2 4 7 --mode correlated < quiz_stats.txt
+
+  # Control correlation strength (default: 1.0)
+  python3 quiz_ranking_simulation.py 1 2 4 7 --mode correlated --strength 1.5 < quiz_stats.txt
 
 Input format (via stdin):
   question_number: correct_answers/total_teams
@@ -30,6 +32,7 @@ import sys
 import random
 import statistics
 import argparse
+import math
 from collections import Counter
 
 
@@ -88,8 +91,11 @@ def parse_quiz_stats(input_lines):
     return quiz_stats, total_teams
 
 
-def simulate_quiz(probabilities, total_teams, num_questions):
-    """Simulate one instance of the quiz."""
+def simulate_quiz_independent(probabilities, total_teams):
+    """
+    Simulate quiz with independent question answering.
+    Each question is answered independently based on its success probability.
+    """
     scores = []
 
     for _ in range(total_teams):
@@ -98,6 +104,71 @@ def simulate_quiz(probabilities, total_teams, num_questions):
         scores.append(score)
 
     return scores
+
+
+def simulate_quiz_correlated(probabilities, total_teams, correlation_strength=1.0):
+    """
+    Simulate quiz with correlated question answering.
+    Stronger teams perform better across all questions.
+
+    Uses a latent variable model:
+    - Each team has an underlying "strength" drawn from Normal(0, correlation_strength)
+    - Team strength affects probability of answering each question correctly
+    - Uses logit transformation to maintain valid probabilities
+
+    Args:
+        probabilities: dict of question -> base probability
+        total_teams: number of teams
+        correlation_strength: standard deviation of team strength distribution
+                            (higher = more variation between teams)
+    """
+    scores = []
+
+    # Convert probabilities to logits for transformation
+    def logit(p):
+        # Handle edge cases
+        p = max(0.001, min(0.999, p))
+        return math.log(p / (1 - p))
+
+    def inverse_logit(x):
+        return 1 / (1 + math.exp(-x))
+
+    base_logits = {q: logit(p) for q, p in probabilities.items()}
+
+    for _ in range(total_teams):
+        # Draw team strength from normal distribution
+        team_strength = random.gauss(0, correlation_strength)
+
+        # Adjust each question's probability based on team strength
+        score = 0
+        for q, base_logit in base_logits.items():
+            # Add team strength to logit, then convert back to probability
+            adjusted_logit = base_logit + team_strength
+            adjusted_prob = inverse_logit(adjusted_logit)
+
+            # Answer question based on adjusted probability
+            if random.random() < adjusted_prob:
+                score += 1
+
+        scores.append(score)
+
+    return scores
+
+
+def simulate_quiz(probabilities, total_teams, mode='independent', correlation_strength=1.0):
+    """
+    Simulate one instance of the quiz.
+
+    Args:
+        probabilities: dict of question -> probability
+        total_teams: number of teams
+        mode: 'independent' or 'correlated'
+        correlation_strength: strength of correlation (only used in correlated mode)
+    """
+    if mode == 'correlated':
+        return simulate_quiz_correlated(probabilities, total_teams, correlation_strength)
+    else:
+        return simulate_quiz_independent(probabilities, total_teams)
 
 
 def calculate_ranking(scores, target_score):
@@ -128,13 +199,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage with stdin
-  echo "1: 177/313
-  2: 190/313
-  3: 266/313" | python3 quiz_ranking_simulation.py 1 2
+  # Independent mode (default) - questions answered independently
+  python3 quiz_ranking_simulation.py 1 2 4 7 < quiz_stats.txt
+
+  # Correlated mode - stronger teams perform better across all questions
+  python3 quiz_ranking_simulation.py 1 2 4 7 --mode correlated < quiz_stats.txt
+
+  # Adjust correlation strength (higher = more variation)
+  python3 quiz_ranking_simulation.py 1 2 4 7 --mode correlated --strength 1.5 < quiz_stats.txt
 
   # From file with custom simulations
-  python3 quiz_ranking_simulation.py 1 2 4 7 --simulations 50000 < stats.txt
+  python3 quiz_ranking_simulation.py 1 2 4 7 --simulations 50000 --input stats.txt
 
 Input format (stdin):
   question_number: correct_answers/total_teams
@@ -160,6 +235,21 @@ Input format (stdin):
         type=argparse.FileType('r'),
         default=sys.stdin,
         help='Input file with quiz statistics (default: stdin)'
+    )
+
+    parser.add_argument(
+        '--mode',
+        type=str,
+        choices=['independent', 'correlated'],
+        default='independent',
+        help='Simulation mode: "independent" (default) or "correlated" (teams have varying strength)'
+    )
+
+    parser.add_argument(
+        '--strength',
+        type=float,
+        default=1.0,
+        help='Correlation strength for correlated mode (default: 1.0, higher = more variation between teams)'
     )
 
     args = parser.parse_args()
@@ -198,6 +288,9 @@ Input format (stdin):
     print(f"  Target team answered correctly: {sorted(args.correct_answers)}")
     print(f"  Target score: {target_score}/{num_questions}")
     print(f"  Number of simulations: {args.simulations:,}")
+    print(f"  Simulation mode: {args.mode}")
+    if args.mode == 'correlated':
+        print(f"  Correlation strength: {args.strength}")
 
     print(f"\nQuestion Success Rates:")
     for q in sorted(probabilities.keys()):
@@ -219,7 +312,7 @@ Input format (stdin):
         if (i + 1) % progress_interval == 0:
             print(f"Progress: {i + 1:,}/{args.simulations:,}")
 
-        scores = simulate_quiz(probabilities, total_teams, num_questions)
+        scores = simulate_quiz(probabilities, total_teams, args.mode, args.strength)
         score_distributions.append(Counter(scores))
 
         min_rank, max_rank = calculate_ranking(scores, target_score)
